@@ -64,7 +64,7 @@ class Compiler:
             "import threading",
             "import concurrent.futures",
             "from http.server import HTTPServer, BaseHTTPRequestHandler",
-            "from src.runtime import *",
+            "from shell_lite.runtime import *",
             "",
             "# Initialize Runtime Helpers",
             "builtins_map = get_builtins()",

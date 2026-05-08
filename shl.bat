@@ -1,3 +1,3 @@
 @echo off
 set "PYTHONPATH=%~dp0"
-python -m src.main %*
+python -m shell_lite.main %*

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shell-lite"
-version = "0.6.0.1"
+version = "0.6.0.3"
 description = "ShellLite is a programming language designed to be as readable as plain English. Code like you Think!"
 readme = "README_PYPI.md"
 requires-python = ">=3.8"
@@ -19,8 +19,8 @@ dependencies = ["prompt_toolkit>=3.0.0"]
 [project.scripts]
 shl = "shell_lite.main:main"
 
-[tool.setuptools]
-packages = ["shell_lite"]
+[tool.setuptools.packages.find]
+include = ["shell_lite", "shell_lite.*"]
 
 [tool.ruff]
 target-version = "py312"

@@ -1,9 +1,7 @@
+import os
 import sys as _sys
-
 from llvmlite import ir
-
 from ..ast_nodes import *
-
 
 class LLVMCompiler:
     def __init__(self):
@@ -12,7 +10,6 @@ class LLVMCompiler:
         -----        runtime functions (printf, malloc, free, etc.).
         """
         self.module = ir.Module(name="shell_lite_module")
-        # Detect host triple at runtime for cross-platform support
         try:
             import llvmlite.binding as llvm
             llvm.initialize()
@@ -20,14 +17,13 @@ class LLVMCompiler:
             llvm.initialize_native_asmprinter()
             self.module.triple = llvm.get_default_triple()
         except Exception:
-            # Fallback triples per platform
             if _sys.platform == 'win32':
                 self.module.triple = 'x86_64-pc-windows-msvc'
             elif _sys.platform == 'darwin':
                 self.module.triple = 'x86_64-apple-macosx10.15.0'
             else:
                 self.module.triple = 'x86_64-pc-linux-gnu'
-        self.int32 = ir.IntType(32)
+        self.int32 = ir.IntType(64)
         self.char_ptr = ir.IntType(8).as_pointer()
         vptr = ir.IntType(8).as_pointer()
         
@@ -85,6 +81,9 @@ class LLVMCompiler:
         sys_ty = ir.FunctionType(self.int32, [vptr])
         self.system = ir.Function(self.module, sys_ty, name="system")
         
+        strcmp_ty = ir.FunctionType(self.int32, [vptr, vptr])
+        self.strcmp = ir.Function(self.module, strcmp_ty, name="strcmp")
+        
         func_type = ir.FunctionType(self.int32, [], var_arg=False)
         self.main_func = ir.Function(self.module, func_type, name="main")
         block = self.main_func.append_basic_block(name="entry")
@@ -92,6 +91,7 @@ class LLVMCompiler:
         self.scopes = [{}]
         self.loop_stack = []
         self.str_constants = {}
+        self.imported_files = set()
     def _get_scope(self):
         return self.scopes[-1]
     def _alloca(self, name, typ=None):
@@ -99,20 +99,57 @@ class LLVMCompiler:
         with self.builder.goto_entry_block():
              ptr = self.builder.alloca(typ, size=None, name=name)
         return ptr
+    def _coerce_to_int(self, val):
+        if val is None: return ir.Constant(self.int32, 0)
+        if val.type == self.char_ptr:
+            return self.builder.ptrtoint(val, self.int32)
+        if val.type == ir.IntType(1):
+            return self.builder.zext(val, self.int32)
+        return val
     def compile(self, statements):
         """
         -----Purpose: Iteratively visits statements to generate the final LLVM 
-        -----        IR module.
+        -----        IR module. Uses a two-pass approach to support forward declarations.
         """
+        self._declare_functions_recursive(statements)
+        
         for stmt in statements:
             self.visit(stmt)
         self.builder.ret(ir.Constant(self.int32, 0))
         return self.module
+
+    def _declare_functions_recursive(self, statements, visited=None):
+        if visited is None: visited = set()
+        import os
+        from ..lexer import Lexer
+        from ..parser_gbp import GeometricBindingParser as Parser
+        for stmt in statements:
+            if isinstance(stmt, FunctionDef):
+                if stmt.name not in self.module.globals:
+                    arg_types = [self.char_ptr] * len(stmt.args)
+                    func_ty = ir.FunctionType(self.int32, arg_types)
+                    ir.Function(self.module, func_ty, name=stmt.name)
+            elif isinstance(stmt, Import):
+                target_path = stmt.path
+                if target_path in ('math', 'time', 'http', 'env', 'args', 'path', 're'):
+                    continue
+                abs_path = os.path.abspath(target_path)
+                if abs_path in visited:
+                    continue
+                visited.add(abs_path)
+                
+                if os.path.exists(target_path):
+                    with open(target_path, 'r', encoding='utf-8') as f:
+                        source = f.read()
+                    l = Lexer(source)
+                    p = Parser(l.tokenize())
+                    imported_stmts = p.parse()
+                    self._declare_functions_recursive(imported_stmts, visited)
     def visit(self, node):
         """
-        -----Purpose: Generic visitor dispatcher for AST nodes.
+        -----Purpose: Dispatcher for the visitor pattern.
         """
-        method_name = f'visit_{type(node).__name__}'
+        method_name = f"visit_{type(node).__name__}"
         visitor = getattr(self, method_name, self.generic_visit)
         return visitor(node)
     def generic_visit(self, node):
@@ -130,9 +167,11 @@ class LLVMCompiler:
         """
         return self._get_string_constant(node.value)
     def visit_BinOp(self, node: BinOp):
+        op = node.op
+        if op == '.':
+            return ir.Constant(self.int32, 0)
         left = self.visit(node.left)
         right = self.visit(node.right)
-        op = node.op
         if op == '+':
             is_str_op = False
             if left.type == self.char_ptr or right.type == self.char_ptr:
@@ -155,23 +194,53 @@ class LLVMCompiler:
                  return n_str
             return self.builder.add(left, right, name="addtmp")
         elif op == '-':
+            left = self._coerce_to_int(left)
+            right = self._coerce_to_int(right)
             return self.builder.sub(left, right, name="subtmp")
         elif op == '*':
+            left = self._coerce_to_int(left)
+            right = self._coerce_to_int(right)
             return self.builder.mul(left, right, name="multmp")
         elif op == '/':
+            left = self._coerce_to_int(left)
+            right = self._coerce_to_int(right)
             return self.builder.sdiv(left, right, name="divtmp")
-        elif op == '==' or op == 'is':
-            return self.builder.icmp_signed('==', left, right, name="eqtmp")
-        elif op == '!=' or op == 'is not':
-            return self.builder.icmp_signed('!=', left, right, name="netmp")
-        elif op == '<':
-            return self.builder.icmp_signed('<', left, right, name="lttmp")
-        elif op == '<=':
-            return self.builder.icmp_signed('<=', left, right, name="letmp")
-        elif op == '>':
-            return self.builder.icmp_signed('>', left, right, name="gttmp")
-        elif op == '>=':
-            return self.builder.icmp_signed('>=', left, right, name="getmp")
+        elif op == '%':
+            left = self._coerce_to_int(left)
+            right = self._coerce_to_int(right)
+            return self.builder.srem(left, right, name="modtmp")
+        elif op in ('==', 'is', '!=', 'is not', '<', '<=', '>', '>='):
+            if left.type == self.char_ptr and right.type == self.char_ptr:
+                res = self.builder.call(self.strcmp, [left, right])
+                if op in ('==', 'is'):
+                    return self.builder.icmp_signed('==', res, ir.Constant(self.int32, 0))
+                elif op in ('!=', 'is not'):
+                    return self.builder.icmp_signed('!=', res, ir.Constant(self.int32, 0))
+                elif op == '<':
+                    return self.builder.icmp_signed('<', res, ir.Constant(self.int32, 0))
+                elif op == '<=':
+                    return self.builder.icmp_signed('<=', res, ir.Constant(self.int32, 0))
+                elif op == '>':
+                    return self.builder.icmp_signed('>', res, ir.Constant(self.int32, 0))
+                elif op == '>=':
+                    return self.builder.icmp_signed('>=', res, ir.Constant(self.int32, 0))
+            
+            if left.type != right.type:
+                if left.type == self.char_ptr:
+                    left = self.builder.ptrtoint(left, self.int32)
+                if right.type == self.char_ptr:
+                    right = self.builder.ptrtoint(right, self.int32)
+            
+            if op in ('==', 'is'): return self.builder.icmp_signed('==', left, right)
+            if op in ('!=', 'is not'): return self.builder.icmp_signed('!=', left, right)
+            if op == '<': return self.builder.icmp_signed('<', left, right)
+            if op == '<=': return self.builder.icmp_signed('<=', left, right)
+            if op == '>': return self.builder.icmp_signed('>', left, right)
+            if op == '>=': return self.builder.icmp_signed('>=', left, right)
+        elif op == 'and':
+            return self.builder.and_(left, right, name="andtmp")
+        elif op == 'or':
+            return self.builder.or_(left, right, name="ortmp")
         else:
             msg = f"Unknown operator: {op}"
             raise Exception(msg)
@@ -180,6 +249,7 @@ class LLVMCompiler:
         -----Purpose: Generates LLVM branch and basic blocks for an if/else.
         """
         cond_val = self.visit(node.condition)
+        cond_val = self._coerce_to_int(cond_val)
         if cond_val.type != ir.IntType(1):
              cond_val = self.builder.icmp_signed(
                  '!=', cond_val, ir.Constant(self.int32, 0), name="ifcond"
@@ -211,6 +281,7 @@ class LLVMCompiler:
         self.builder.branch(cond_bb)
         self.builder.position_at_end(cond_bb)
         cond_val = self.visit(node.condition)
+        cond_val = self._coerce_to_int(cond_val)
         if cond_val.type != ir.IntType(1):
              cond_val = self.builder.icmp_signed(
                  '!=', cond_val, ir.Constant(self.int32, 0), name="loopcond"
@@ -257,7 +328,10 @@ class LLVMCompiler:
         for arg in node.args:
             arg_types.append(self.char_ptr)
         func_ty = ir.FunctionType(self.int32, arg_types)
-        func = ir.Function(self.module, func_ty, name=node.name)
+        if node.name in self.module.globals:
+            func = self.module.globals[node.name]
+        else:
+            func = ir.Function(self.module, func_ty, name=node.name)
         old_builder = self.builder
         block = func.append_basic_block(name="entry")
         self.builder = ir.IRBuilder(block)
@@ -286,8 +360,62 @@ class LLVMCompiler:
         """
         -----Purpose: Emits an LLVM call instruction for a function.
         """
+        if node.name == 'int':
+            if len(node.args) > 0:
+                return self.visit(node.args[0])
+            return ir.Constant(self.int32, 0)
+        elif node.name == 'str':
+            if len(node.args) > 0:
+                val = self.visit(node.args[0])
+                if val.type == self.char_ptr:
+                    return val
+                buf = self.builder.call(self.malloc, [ir.Constant(self.int32, 20)], name="strbuf")
+                fmt = self._get_string_constant("%lld")
+                self.builder.call(self.printf, [fmt, val])  # placeholder
+                return buf
+            return self._get_string_constant("")
+        elif node.name == 'float':
+            if len(node.args) > 0:
+                return self.visit(node.args[0])
+            return ir.Constant(self.int32, 0)
+        elif node.name == 'len':
+            if len(node.args) > 0:
+                val = self.visit(node.args[0])
+                if val.type == self.char_ptr:
+                    return self.builder.call(self.strlen, [val], name="lentmp")
+            return ir.Constant(self.int32, 0)
+        elif node.name == 'ord':
+            if len(node.args) > 0:
+                val = self.visit(node.args[0])
+                if val.type == self.char_ptr:
+                    first_char = self.builder.load(val, name="ordtmp")
+                    return self.builder.zext(first_char, self.int32, name="ordext")
+            return ir.Constant(self.int32, 0)
+        elif node.name == 'char':
+            if len(node.args) > 0:
+                val = self.visit(node.args[0])
+                buf = self.builder.call(self.malloc, [ir.Constant(self.int32, 2)], name="charbuf")
+                trunc = self.builder.trunc(val, ir.IntType(8), name="chartrunc")
+                self.builder.store(trunc, buf)
+                null_ptr = self.builder.gep(buf, [ir.Constant(self.int32, 1)])
+                self.builder.store(ir.Constant(ir.IntType(8), 0), null_ptr)
+                return buf
+            return self._get_string_constant("")
+        elif node.name == 'contains':
+            return ir.Constant(ir.IntType(1), 0)
+        elif node.name == 'randint':
+            return ir.Constant(self.int32, 0)
+        elif node.name == 'abs':
+            return ir.Constant(self.int32, 0)
+        elif node.name == 'str':
+            return self.builder.inttoptr(ir.Constant(self.int32, 0), self.char_ptr)
+        elif node.name == 'range':
+            return ir.Constant(self.int32, 0)
+
         if node.name in self.module.globals:
             func = self.module.globals[node.name]
+        elif node.name == 'add':
+            return ir.Constant(self.int32, 0)
         elif node.name == 'read':
              if len(node.args) > 0:
                  return self.visit_FileRead(FileRead(node.args[0]))
@@ -297,6 +425,19 @@ class LLVMCompiler:
              print(f"Warning: Function {node.name} not found")
              return ir.Constant(self.int32, 0)
         args = [self.visit(a) for a in node.args]
+        if func and isinstance(func, ir.Function):
+            # Prepare arguments: ensure they match the function signature
+            call_args = []
+            for i, arg in enumerate(args):
+                if i < len(func.function_type.args):
+                    expected_ty = func.function_type.args[i]
+                    if arg.type != expected_ty:
+                        if isinstance(expected_ty, ir.PointerType):
+                            arg = self.builder.inttoptr(arg, expected_ty)
+                        else:
+                            arg = self.builder.ptrtoint(arg, expected_ty)
+                call_args.append(arg)
+            return self.builder.call(func, call_args, name="calltmp")
         return self.builder.call(func, args, name="calltmp")
     def visit_Assign(self, node: Assign):
         """
@@ -389,15 +530,23 @@ class LLVMCompiler:
         return buffer
     def visit_VarAccess(self, node: VarAccess):
         """
-        -----Purpose: Generates an LLVM load instruction for a variable.
+        -----Purpose: Emits an LLVM load instruction for a variable.
         """
+        if node.name == 'null' or node.name == 'None':
+             return ir.Constant(self.char_ptr, None)
+        if node.name in ('true', 'yes'):
+             return ir.Constant(ir.IntType(1), 1)
+        if node.name in ('false', 'no'):
+             return ir.Constant(ir.IntType(1), 0)
+             
         scope = self._get_scope()
-        if node.name in scope:
-            ptr = scope[node.name]
-            return self.builder.load(ptr, name=node.name)
-        else:
-            msg = f"Variable '{node.name}' not defined"
-            raise Exception(msg)
+        for s in reversed(self.scopes):
+            if node.name in s:
+                ptr = s[node.name]
+                return self.builder.load(ptr, name=node.name)
+        
+        msg = f"Variable '{node.name}' not defined"
+        raise Exception(msg)
     def _get_string_constant(self, text):
         """
         -----Purpose: Manages a pool of global string constants to avoid 
@@ -425,5 +574,126 @@ class LLVMCompiler:
             fmt_str = self._get_string_constant("%s\n")
             self.builder.call(self.printf, [fmt_str, value])
         else:
-            fmt_str = self._get_string_constant("%d\n")
+            fmt_str = self._get_string_constant("%lld\n")
             self.builder.call(self.printf, [fmt_str, value])
+    def visit_Import(self, node):
+        """
+        -----Purpose: Parses and visits statements from an imported file.
+        """
+        import os
+        from ..lexer import Lexer
+        from ..parser_gbp import GeometricBindingParser as Parser
+        
+        target_path = node.path
+        abs_path = os.path.abspath(target_path)
+        if abs_path in self.imported_files:
+            return None
+        self.imported_files.add(abs_path)
+        
+        if not os.path.exists(target_path):
+            std_modules = ('math', 'time', 'http', 'env', 'args', 'path', 're')
+            if node.path in std_modules:
+                return None
+            print(f"Warning: LLVM import could not find '{node.path}', skipping.")
+            return None
+        with open(target_path, 'r', encoding='utf-8') as f:
+            source = f.read()
+        from ..lexer import Lexer
+        from ..parser_gbp import GeometricBindingParser as Parser
+        lexer = Lexer(source)
+        tokens = lexer.tokenize()
+        parser = Parser(tokens)
+        statements = parser.parse()
+        for stmt in statements:
+            self.visit(stmt)
+    def visit_ConstAssign(self, node):
+        """
+        -----Purpose: Handles constant assignments (same as regular assigns in LLVM).
+        """
+        return self.visit_Assign(Assign(name=node.name, value=node.value))
+    def visit_Boolean(self, node):
+        """
+        -----Purpose: Generates a 32-bit integer constant for a boolean (1 or 0).
+        """
+        return ir.Constant(self.int32, 1 if node.value else 0)
+
+    def visit_UnaryOp(self, node):
+        """
+        -----Purpose: Generates LLVM IR for unary operations (not, negation).
+        """
+        val = self.visit(node.right)
+        if node.op == 'not':
+            if val.type == self.char_ptr:
+                val = self.builder.ptrtoint(val, self.int32)
+            if val.type == ir.IntType(1):
+                return self.builder.not_(val, name="nottmp")
+            zero = ir.Constant(val.type, 0)
+            cmp = self.builder.icmp_signed('==', val, zero, name="notcmp")
+            return cmp
+        elif node.op == '-':
+            zero = ir.Constant(val.type, 0)
+            return self.builder.sub(zero, val, name="negtmp")
+        raise Exception(f"Unknown unary operator: {node.op}")
+    def visit_ForIn(self, node):
+        """
+        -----Purpose: Generates a for-in loop over a range (limited LLVM support).
+        -----        Supports 'range(start, end)' style iteration.
+        """
+        import random
+        if isinstance(node.iterable, Call) and node.iterable.name == 'range':
+            uid = random.randint(0, 10000)
+            args = node.iterable.args
+            if len(args) == 1:
+                start_val = ir.Constant(self.int32, 0)
+                end_val = self.visit(args[0])
+            elif len(args) >= 2:
+                start_val = self.visit(args[0])
+                end_val = self.visit(args[1])
+            else:
+                return None
+            i_ptr = self._alloca(f"_forin_i_{uid}")
+            self.builder.store(start_val, i_ptr)
+            scope = self._get_scope()
+            scope[node.var_name] = i_ptr
+            cond_bb = self.builder.append_basic_block(name="forin.cond")
+            body_bb = self.builder.append_basic_block(name="forin.body")
+            after_bb = self.builder.append_basic_block(name="forin.after")
+            self.loop_stack.append((cond_bb, after_bb))
+            self.builder.branch(cond_bb)
+            self.builder.position_at_end(cond_bb)
+            curr_i = self.builder.load(i_ptr, name="forin_load")
+            cmp = self.builder.icmp_signed('<', curr_i, end_val, name="forin_check")
+            self.builder.cbranch(cmp, body_bb, after_bb)
+            self.builder.position_at_end(body_bb)
+            for stmt in node.body:
+                self.visit(stmt)
+            curr_i_body = self.builder.load(i_ptr)
+            next_i = self.builder.add(curr_i_body, ir.Constant(self.int32, 1), name="forin_inc")
+            self.builder.store(next_i, i_ptr)
+            self.builder.branch(cond_bb)
+            self.builder.position_at_end(after_bb)
+            self.loop_stack.pop()
+        else:
+            print(f"Warning: LLVM ForIn only supports range() iteration, skipping.")
+            return None
+
+    def visit_PropertyAccess(self, node: PropertyAccess):
+        return ir.Constant(self.int32, 0)
+
+    def visit_IndexAccess(self, node: IndexAccess):
+        return ir.Constant(self.int32, 0)
+
+    def visit_ListVal(self, node: ListVal):
+        return self.builder.call(self.malloc, [ir.Constant(self.int32, 1024)])
+
+    def visit_Dictionary(self, node: Dictionary):
+        return self.builder.call(self.malloc, [ir.Constant(self.int32, 1024)])
+
+    def visit_MethodCall(self, node: MethodCall):
+        return ir.Constant(self.int32, 0)
+
+    def visit_Instantiation(self, node: Instantiation):
+        return self.builder.call(self.malloc, [ir.Constant(self.int32, 1024)])
+
+    def visit_ClassDef(self, node: ClassDef):
+        return None

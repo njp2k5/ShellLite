@@ -206,6 +206,14 @@ class Try(Node):
     catch_var: str
     catch_body: List[Node]
 @dataclass
+class Match(Node):
+    """
+    -----Purpose: Represents a pattern matching switch block.
+    """
+    match_expr: Node
+    cases: List[tuple[Node, List[Node]]]
+    default_case: Optional[List[Node]] = None
+@dataclass
 class Lambda(Node):
     """
     -----Purpose: Represents an anonymous function.

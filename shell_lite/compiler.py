@@ -282,13 +282,51 @@ class Compiler:
         self.indentation -= 1
         return code
     def visit_For(self, node: For):
-        """
-        -----Purpose: Compiles a count-based loop using range().
-        """
         code = f"for _ in range({self.visit(node.count)}):\n"
         self.indentation += 1
         code += self.compile_block(node.body)
         self.indentation -= 1
+        return code
+
+    def visit_Unless(self, node: Unless):
+        """
+        -----Purpose: Compiles an UNLESS block (if not condition) to Python.
+        """
+        code = f"if not ({self.visit(node.condition)}):\n"
+        self.indentation += 1
+        code += self.compile_block(node.body)
+        self.indentation -= 1
+        return code
+
+    def visit_Match(self, node: Match):
+        """
+        -----Purpose: Compiles a pattern matching block into if-elif-else statements.
+        """
+        code = ""
+        match_var_expr = self.visit(node.match_expr)
+        
+        for i, (case_expr, case_body) in enumerate(node.cases):
+            case_val_expr = self.visit(case_expr)
+            condition = f"{match_var_expr} == {case_val_expr}"
+            
+            if i == 0:
+                code += f"if {condition}:\n"
+            else:
+                code += f"\n{self.indent()}elif {condition}:\n"
+            
+            self.indentation += 1
+            code += self.compile_block(case_body)
+            self.indentation -= 1
+            
+        if node.default_case:
+            if not node.cases:
+                code += f"if True:\n"
+            else:
+                code += f"\n{self.indent()}else:\n"
+            self.indentation += 1
+            code += self.compile_block(node.default_case)
+            self.indentation -= 1
+            
         return code
 
     def visit_ForIn(self, node: ForIn):

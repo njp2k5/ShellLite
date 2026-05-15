@@ -697,6 +697,20 @@ class Interpreter:
         elif node.else_body:
             for stmt in node.else_body:
                 self.visit(stmt)
+    def visit_Match(self, node):
+        """
+        -----Purpose: Evaluates a pattern matching (when/is/otherwise) block.
+        """
+        match_val = self.visit(node.match_expr)
+        for case_expr, case_body in node.cases:
+            case_val = self.visit(case_expr)
+            if match_val == case_val:
+                for stmt in case_body:
+                    self.visit(stmt)
+                return
+        if node.default_case:
+            for stmt in node.default_case:
+                self.visit(stmt)
     def visit_For(self, node: For):
         """
         -----Purpose: Evaluates a numeric for loop.

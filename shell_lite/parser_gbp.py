@@ -272,12 +272,12 @@ class GeometricBindingParser:
                     is_real_assignment = True
                 elif assign_idx == 3 and len(node.tokens) > 1 and node.tokens[1].type == 'AS':
                     is_real_assignment = True
-                elif len(node.tokens) > 1 and node.tokens[1].type == 'LBRACKET':
+                elif any(t.type in ('LBRACKET', 'DOT') for t in node.tokens[:assign_idx]):
                     is_real_assignment = True
                 
                 if is_real_assignment:
-                    if len(node.tokens) > 1 and node.tokens[1].type == 'LBRACKET':
-                        ast_node = self.bind_index_assignment(node, assign_idx)
+                    if any(t.type in ('LBRACKET', 'DOT') for t in node.tokens[:assign_idx]):
+                        ast_node = self.bind_complex_assignment(node, assign_idx)
                     else:
                         ast_node = self.bind_assignment(node)
                     return self._set_node_loc(ast_node, node)
@@ -572,9 +572,9 @@ class GeometricBindingParser:
         value = self.parse_expr_iterative(expr_tokens)
         return ConstAssign(name, value)
         
-    def bind_index_assignment(self, node: GeoNode, assign_idx: int) -> Any:
+    def bind_complex_assignment(self, node: GeoNode, assign_idx: int) -> Any:
         """
-        -----Purpose: Binds an array/dict assignment
+        -----Purpose: Binds an array/dict assignment or property assignment.
         """
         lhs_tokens = node.tokens[:assign_idx]
         value_tokens = node.tokens[assign_idx + 1:]
@@ -598,6 +598,13 @@ class GeometricBindingParser:
             
         if type(lhs_expr).__name__ == "IndexAccess":
             return IndexAssign(lhs_expr.obj, lhs_expr.index, value_expr)
+        if type(lhs_expr).__name__ == "BinOp" and lhs_expr.op == ".":
+            # self.source -> BinOp(left=VarAccess(self), op='.', right=VarAccess(source))
+            instance_name = lhs_expr.left.name if hasattr(lhs_expr.left, 'name') else str(lhs_expr.left)
+            property_name = lhs_expr.right.name if hasattr(lhs_expr.right, 'name') else str(lhs_expr.right)
+            return PropertyAssign(instance_name, property_name, value_expr)
+        
+        return Assign(str(lhs_expr), value_expr)
         
         raise SyntaxError("Invalid index assignment syntax")
     def bind_expression_stmt(self, node: GeoNode) -> Any:
@@ -1252,10 +1259,34 @@ class GeometricBindingParser:
                 i += 1
         body = self.bind_statement_list(node.children)
         return FunctionDef(name, args, body)
-    def bind_when(self, node: GeoNode) -> OnRequest:
+    def bind_when(self, node: GeoNode) -> Node:
         """
-        -----Purpose: Binds a WHEN block GeoNode (HTTP route handler).
+        -----Purpose: Binds a WHEN block GeoNode. Can be HTTP route handler
+                      or a Match/Switch block.
         """
+        is_match = False
+        for child in node.children:
+            if child.head_token.type in ('IS', 'OTHERWISE'):
+                is_match = True
+                break
+                
+        if is_match:
+            expr_tokens = self._extract_expr_tokens(node.tokens, start=1)
+            match_expr = self.parse_expr_iterative(expr_tokens)
+            cases = []
+            default_case = None
+            
+            for child in node.children:
+                if child.head_token.type == 'IS':
+                    case_expr_tokens = self._extract_expr_tokens(child.tokens, start=1)
+                    case_expr = self.parse_expr_iterative(case_expr_tokens)
+                    case_body = self.bind_statement_list(child.children)
+                    cases.append((case_expr, case_body))
+                elif child.head_token.type == 'OTHERWISE':
+                    default_case = self.bind_statement_list(child.children)
+            return Match(match_expr, cases, default_case)
+            
+        # Default to HTTP route handler
         tokens = node.tokens
         path = String('/')
         for i, t in enumerate(tokens):
@@ -1457,6 +1488,10 @@ class GeometricBindingParser:
                     values.append(Call('set', [ListVal([])]))
                     i += 3
                     continue
+            if t.type == 'ID' and t.value.lower() == 'a' and i + 1 < len(tokens) and tokens[i + 1].type == 'ID' and tokens[i + 1].value.lower() == 'dictionary':
+                values.append(Dictionary([]))
+                i += 2
+                continue
             if t.type == 'MINUS':
                 is_unary = (
                     i == 0 or

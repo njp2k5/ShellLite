@@ -325,7 +325,6 @@ class GeometricBindingParser:
         body = self.bind_statement_list(node.children)
         return Until(condition, body)
     def bind_try(self, node: GeoNode) -> Try:
-        # Dummy; handled by parse() grouping
         return None
     def bind_structure(self, node: GeoNode) -> ClassDef:
         """
@@ -334,13 +333,31 @@ class GeometricBindingParser:
         tokens = node.tokens
         name = tokens[1].value
         parent = None
-        if len(tokens) > 2:
-            if tokens[2].type == 'EXTENDS':
-                parent = tokens[3].value
-            elif tokens[2].type == 'LPAREN':
-                parent = tokens[3].value
         properties = []
         methods = []
+        
+        # Check for extends
+        extends_idx = -1
+        for i, t in enumerate(tokens):
+            if t.type == 'EXTENDS' or t.type == 'LPAREN':
+                extends_idx = i
+                break
+        if extends_idx != -1 and extends_idx + 1 < len(tokens):
+            parent = tokens[extends_idx + 1].value
+            
+        # Check for inline 'has'
+        has_idx = -1
+        for i, t in enumerate(tokens):
+            if t.type == 'HAS':
+                has_idx = i
+                break
+        if has_idx != -1:
+            i = has_idx + 1
+            while i < len(tokens) and tokens[i].type != 'COLON':
+                if tokens[i].type == 'ID':
+                    properties.append((tokens[i].value, None))
+                i += 1
+
         for child in node.children:
             head = child.head_token.type
             if head == 'HAS' or head == 'ID':
@@ -1390,7 +1407,7 @@ class GeometricBindingParser:
             'GT': 5, 'LT': 5, 'EQ': 4,
             'AND': 2, 'OR': 1,
             'MATCHES': 5, 'IS': 4, 'BE': 4, 'CONTAINS': 5,
-            'DOT': 30, 'NOT': 15
+            'DOT': 30, 'NOT': 15, 'LBRACKET': 30
         }
         
         def apply_op():
@@ -1538,6 +1555,11 @@ class GeometricBindingParser:
                 is_indexing = False
                 if i > 0 and tokens[i - 1].type in ('ID', 'RBRACKET', 'RPAREN', 'STRING'):
                     is_indexing = True
+                
+                if is_indexing:
+                    # Apply higher or equal precedence operators before indexing (e.g., DOT)
+                    while ops and ops[-1] != 'LPAREN' and get_precedence(ops[-1]) >= 30:
+                        apply_op()
                     
                 depth = 1
                 j = i + 1
@@ -1831,7 +1853,7 @@ class GeometricBindingParser:
                         condition = self.parse_expr_iterative(tokens[cond_start:], children)
                     values.append(ListComprehension(VarAccess(var_name), var_name, iterable, condition))
                     break
-            elif ((t.type == 'ID' and t.value.lower() == 'split') or t.type in ('UPPER', 'LOWER')) and (i + 1 >= len(tokens) or tokens[i+1].type != 'LPAREN'):
+            elif ((t.type == 'ID' and t.value.lower() in ('split', 'len', 'length', 'count')) or t.type in ('UPPER', 'LOWER')) and (i + 1 >= len(tokens) or tokens[i+1].type != 'LPAREN'):
                 func_name = t.value.lower()
                 i += 1
                 only_letters = False

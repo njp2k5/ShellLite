@@ -592,6 +592,7 @@ class Interpreter:
                         args = [self.visit(a) for a in node.right.args]
                         old_env = self.current_env
                         new_env = Environment(parent=self.global_env)
+                        new_env.set('self', left)
                         for k, v in left.data.items():
                             new_env.set(k, v)
                         for i, (arg_name, default_node, type_hint) in enumerate(method_node.args):
@@ -1006,6 +1007,7 @@ class Interpreter:
             raise AttributeError(f"Structure '{instance.class_def.name}' has no method '{node.method_name}'")
         old_env = self.current_env
         new_env = Environment(parent=self.global_env)
+        new_env.set('self', instance)
         for k, v in instance.data.items():
             new_env.set(k, v)
         if len(node.args) > len(method_node.args):

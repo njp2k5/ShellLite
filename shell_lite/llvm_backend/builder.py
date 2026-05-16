@@ -19,8 +19,9 @@ def build_llvm(filename: str):
     parser = Parser(tokens)
     statements = parser.parse()
     
-    compiler = LLVMCompiler()
-    module = compiler.compile(statements)
+    compiler = LLVMCompiler(base_path=os.path.dirname(os.path.abspath(filename)), filename=os.path.basename(filename))
+    is_entry = os.path.basename(filename) in ["main.shl", "test.shl", "simple_main.shl", "clean_main.shl"]
+    module = compiler.compile(statements, is_entry_point=is_entry)
     llvm_ir = str(module)
     
     print("\n--- Generated LLVM IR ---")

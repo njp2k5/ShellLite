@@ -4,23 +4,26 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shell-lite"
-version = "0.6.1.1"
+version = "0.6.1.2"
 description = "ShellLite is a programming language designed to be as readable as plain English. Code like you Think!"
 readme = "README_PYPI.md"
 requires-python = ">=3.8"
 license = {text = "GPLv3 with classpath exception"}
-authors = [{name = "Shrey Naithani", email = "contact@shelllite.tech"}]
+authors = [{email = "contact@shelllite.tech"}]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
 ]
-dependencies = ["prompt_toolkit==3.0.43", "llvmlite==0.42.0"]
+dependencies = ["prompt_toolkit>=3.0.43", "llvmlite>=0.42.0"]
 
 [project.scripts]
 shl = "shell_lite.main:main"
 
 [tool.setuptools.packages.find]
 include = ["shell_lite", "shell_lite.*"]
+
+[tool.setuptools.package-data]
+shell_lite = ["stdlib/*.shl"]
 
 [tool.ruff]
 target-version = "py312"

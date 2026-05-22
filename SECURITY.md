@@ -6,7 +6,8 @@ The following versions of ShellLite are currently supported with security update
 
 | Version | Supported          |
 | ------- | ------------------ |
-| v0.05.x | :white_check_mark: |
+| v0.06.x | :white_check_mark: |
+| v0.05.x | :x:                |
 | v0.04.x | :x:                |
 | < v0.04 | :x:                |
 

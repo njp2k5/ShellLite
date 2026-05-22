@@ -1,6 +1,4 @@
-"""
-TODO:- Add proper Docstrings/Comments
-"""
+# Language Server Protocol (LSP) server implementation for the ShellLite IDE integration.
 import json
 import logging
 import sys

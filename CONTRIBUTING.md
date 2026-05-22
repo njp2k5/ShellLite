@@ -37,23 +37,18 @@ First off, thank you for considering contributing to ShellLite! It's people like
 
 2. Make your changes.
 3. Run the tests to ensure nothing is broken (see below).
-4. Commit your changes. Please write clear, descriptive commit messages.
+4. Commit your changes. Please write clear, and descriptive commit messages.
 
 ## Running Tests
 
 ShellLite has a suite of tests located in the `tests` directory.
-
-To run a specific test file:
-```bash
-python -m shell_lite.main tests/core/math.shl
-```
 
 To run the test suite with pytest:
 ```bash
 pytest tests/
 ```
 
-Please verify that the core and advanced features work as expected before submitting.
+Please verify that your updates do not break anything :)
 
 ## Pull Request Process
 
@@ -65,7 +60,7 @@ Please verify that the core and advanced features work as expected before submit
 ## Code Style
 
 - **Python**: Please follow PEP 8 standards.
-- **ShellLite**: Ensure scripts are readable and follow the "English-like" philosophy.
+- **ShellLite**: Ensure scripts are readable and follow the "English like" philosophy.
 
 ## Reporting Bugs
 

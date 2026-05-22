@@ -1,45 +1,122 @@
-use python "http.server" as py_http
-use python "socketserver" as py_socket
-use python "urllib.parse" as py_url
-use python "threading"
-use python "os"
+use python "socket" as py_socket
 use python "re"
+use python "os"
+use python "mimetypes"
 
 _routes = []
 _static_routes = []
-_middleware = []
 
 to std_web_on_request path, handler
-    global _routes
-    if path == "__middleware__"
-        add handler to _middleware
-    else
-        pattern = "^" + path + "$"
-        if ":" in path
-            pattern = re.sub(":(\w+)", "(?P<\\1>[^/]+)", path)
-            pattern = "^" + pattern + "$"
-        add {"path": path, "regex": re.compile(pattern), "handler": handler} to _routes
+    pattern = "^" + path + "$"
+    if ":" in path
+        pattern = re.sub(":(\\\\w+)", "(?P<\\\\1>[^/]+)", path)
+        pattern = "^" + pattern + "$"
+    add {"path": path, "regex": re.compile(pattern), "handler": handler} to _routes
 
 to std_web_serve_static url, folder
-    global _static_routes
     add {"url": url, "folder": folder} to _static_routes
 
-to std_web_listen port_num
-    global _routes, _static_routes
-    say "Starting ShellLite Web Server on port {port_num}..."
-    
-    # We use the bridge to define a Python handler class
-    use python "http.server" as py_http
-    
-    to handler_factory routes_ref, static_ref
-        py_code = "from http.server import BaseHTTPRequestHandler\nimport os\nclass ShellLiteRequestHandler(BaseHTTPRequestHandler):\n    routes = []\n    static_routes = []\n    def do_GET(self): self.handle_any()\n    def do_POST(self): self.handle_any()\n    def handle_any(self):\n        path = self.path.split('?')[0]\n        for sr in self.static_routes:\n            if path.startswith(sr['url']):\n                rel = path[len(sr['url']):].lstrip('/')\n                full = os.path.join(sr['folder'], rel)\n                if os.path.exists(full) and os.path.isfile(full):\n                    self.send_response(200)\n                    self.end_headers()\n                    with open(full, 'rb') as f: self.wfile.write(f.read())\n                    return\n        for r in self.routes:\n            match = r['regex'].match(path)\n            if match:\n                handler = r['handler']\n                try:\n                    res = handler()\n                    self.send_response(200)\n                    self.send_header('Content-Type', 'text/html')\n                    self.end_headers()\n                    self.wfile.write(str(res).encode('utf-8'))\n                except Exception as e:\n                    self.send_response(500)\n                    self.end_headers()\n                    self.wfile.write(f'Error: {e}'.encode('utf-8'))\n                return\n        self.send_response(404)\n        self.end_headers()\n        self.wfile.write(b'404 Not Found')\n\ndef get_handler(r, s):\n    ShellLiteRequestHandler.routes = r\n    ShellLiteRequestHandler.static_routes = s\n    return ShellLiteRequestHandler\n"
-        use python "types"
-        m = types.ModuleType("dynamic_handler")
-        py_exec(py_code, m.__dict__)
-        give m.get_handler(routes_ref, static_ref)
+to handle_client client
+    try
+        raw = client.recv(8192)
+        if not raw
+            client.close()
+            give null
+            
+        request_text = raw.decode("utf-8")
+        lines = request_text.splitlines()
+        if empty(lines)
+            client.close()
+            give null
+            
+        first_line = lines[0]
+        parts = first_line.split(" ")
+        if len(parts) is less than 2
+            client.close()
+            give null
+            
+        method = parts[0]
+        full_path = parts[1]
+        path = full_path.split("?")[0]
+        
+        response_body = ""
+        status = "200 OK"
+        content_type = "text/html"
+        
+        found_static = no
+        for sr in _static_routes
+            if path.startswith(sr["url"])
+                rel = path.replace(sr["url"], "", 1).lstrip("/")
+                full = os.path.join(sr["folder"], rel)
+                if os.path.exists(full) and os.path.isfile(full)
+                    res = mimetypes.guess_type(full)
+                    content_type = res[0]
+                    if not content_type
+                        content_type = "application/octet-stream"
+                    
+                    f = open(full, "rb")
+                    response_body = f.read()
+                    f.close()
+                    found_static = yes
+                    stop
+                    
+        if found_static
+            send_response(client, status, content_type, response_body)
+            give null
 
-    handler_class = handler_factory(_routes, _static_routes)
+        found = no
+        for r in _routes
+            route_match = r["regex"].match(path)
+            if route_match
+                handler = r["handler"]
+                try
+                    response_body = handler()
+                    status = "200 OK"
+                    content_type = "text/html"
+                    found = yes
+                catch e
+                    status = "500 Internal Server Error"
+                    response_body = "<h1>500 Internal Server Error</h1><p>" + str(e) + "</p>"
+                    found = yes
+                stop
+                
+        if not found
+            status = "404 Not Found"
+            response_body = "<h1>404 Not Found</h1>"
+            content_type = "text/html"
+            
+        send_response(client, status, content_type, response_body)
+    catch e
+        say "Error handling client: " + str(e)
+        client.close()
+
+to send_response client, status, content_type, body
+    body_data = body
+    if typeof(body) is not "str"
+        if typeof(body) is not "bytes"
+            body_data = str(body)
+            
+    if typeof(body_data) is "str"
+        body_data = body_data.encode("utf-8")
+        
+    headers = "HTTP/1.1 " + status + "\r\n"
+    headers = headers + "Content-Type: " + content_type + "\r\n"
+    headers = headers + "Content-Length: " + str(len(body_data)) + "\r\n"
+    headers = headers + "Connection: close\r\n\r\n"
     
-    use python "http.server" as py_http_server
-    srv = py_http_server.ThreadingHTTPServer(tuple(["", int(port_num)]), handler_class)
-    srv.serve_forever()
+    res_data = headers.encode("utf-8") + body_data
+    client.sendall(res_data)
+    client.close()
+
+to std_web_listen port
+    web_server = py_socket.socket(py_socket.AF_INET, py_socket.SOCK_STREAM)
+    web_server.setsockopt(py_socket.SOL_SOCKET, py_socket.SO_REUSEADDR, 1)
+    web_server.bind(tuple(["", int(port)]))
+    web_server.listen(5)
+    
+    say "Starting ShellLite Web Server on port " + str(port) + "..."
+    
+    forever
+        res = web_server.accept()
+        client = res[0]
+        spawn handle_client(client)

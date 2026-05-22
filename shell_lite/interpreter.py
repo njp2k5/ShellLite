@@ -97,24 +97,64 @@ class PythonBridgeWrapper:
                         unwrapped_args = [a._obj if isinstance(a, PythonBridgeWrapper) else a for a in args]
                         unwrapped_kwargs = {k: (v._obj if isinstance(v, PythonBridgeWrapper) else v) for k, v in kwargs.items()}
                         result = attr(*unwrapped_args, **unwrapped_kwargs)
-                        if type(result) in (int, float, str, bool, type(None), list, dict):
+                        if type(result) in (int, float, str, bool, type(None), list, dict, bytes):
                             return result
                         return PythonBridgeWrapper(result, name=f"{self._name}.{key}()")
                     except Exception as e:
                         raise RuntimeError(f"Python interop error calling '{self._name}.{key}': {e}")
                 return wrapper
-            if type(attr) in (int, float, str, bool, type(None), list, dict):
+            if type(attr) in (int, float, str, bool, type(None), list, dict, bytes):
                 return attr
             return PythonBridgeWrapper(attr, name=f"{self._name}.{key}")
         except AttributeError:
             raise AttributeError(f"Python object '{self._name}' has no member '{key}'")
 
+    def __getitem__(self, key):
+        res = self._obj[key]
+        if type(res) in (int, float, str, bool, type(None), list, dict, bytes):
+            return res
+        return PythonBridgeWrapper(res, name=f"{self._name}[{key}]")
+
+    def __setitem__(self, key, value):
+        self._obj[key] = value
+
+    def __len__(self):
+        return len(self._obj)
+
+    def __bool__(self):
+        return bool(self._obj)
+
+    def __add__(self, other):
+        other_obj = other._obj if isinstance(other, PythonBridgeWrapper) else other
+        res = self._obj + other_obj
+        if type(res) in (int, float, str, bool, type(None), list, dict, bytes): return res
+        return PythonBridgeWrapper(res)
+
+    def __sub__(self, other):
+        other_obj = other._obj if isinstance(other, PythonBridgeWrapper) else other
+        res = self._obj - other_obj
+        if type(res) in (int, float, str, bool, type(None), list, dict, bytes): return res
+        return PythonBridgeWrapper(res)
+
+    def __mul__(self, other):
+        other_obj = other._obj if isinstance(other, PythonBridgeWrapper) else other
+        res = self._obj * other_obj
+        if type(res) in (int, float, str, bool, type(None), list, dict, bytes): return res
+        return PythonBridgeWrapper(res)
+
+    def __truediv__(self, other):
+        other_obj = other._obj if isinstance(other, PythonBridgeWrapper) else other
+        res = self._obj / other_obj
+        if type(res) in (int, float, str, bool, type(None), list, dict, bytes): return res
+        return PythonBridgeWrapper(res)
+
 class LambdaFunction:
-    def __init__(self, params: List[str], body, interpreter):
+    def __init__(self, params: List[str], body, interpreter, name: Optional[str] = None):
         self.params = params
         self.body = body
         self.interpreter = interpreter
         self.closure_env = interpreter.current_env
+        self.name = name
 
     def __call__(self, *args, **kwargs):
         old_env = self.interpreter.current_env
@@ -143,7 +183,7 @@ class Instance:
     def get_method(self, name: str):
         for method in self.class_def.methods:
             if method.name == name:
-                return LambdaFunction(['self'] + [a[0] for a in method.args], method.body, self.interpreter)
+                return LambdaFunction(['self'] + [a[0] for a in method.args], method.body, self.interpreter, name=method.name)
         return None
 class JITTag:
     def __init__(self, name, attrs=None):
@@ -192,6 +232,7 @@ def make_jit_tag_fn(name, interpreter):
 class Interpreter:
     def __init__(self):
         self.safe_mode = os.environ.get("SHL_SAFE") == "1"
+        self._thread_local = threading.local()
         self.global_env = Environment()
         self.current_env = self.global_env
         self.functions: Dict[str, FunctionDef] = {}
@@ -238,6 +279,16 @@ class Interpreter:
         for k, v in self.builtins.items(): self.global_env.set(k, v)
         self._load_stdlib()
 
+    @property
+    def current_env(self):
+        if not hasattr(self._thread_local, 'current_env'):
+            self._thread_local.current_env = self.global_env
+        return self._thread_local.current_env
+
+    @current_env.setter
+    def current_env(self, value):
+        self._thread_local.current_env = value
+
     def _load_stdlib(self):
         stdlib_path = os.path.join(os.path.dirname(__file__), 'stdlib')
         if not os.path.exists(stdlib_path): return
@@ -253,7 +304,15 @@ class Interpreter:
         if node is None: return None
         method_name = f'visit_{type(node).__name__}'
         visitor = getattr(self, method_name, self.generic_visit)
-        return visitor(node)
+        
+        try:
+            return visitor(node)
+        except AttributeError as e:
+            if "'Number' object has no attribute 'name'" in str(e):
+                print(f"DEBUG Error in {method_name} for node: {node}")
+            raise
+        except Exception as e:
+            raise
 
     def generic_visit(self, node: Node):
         raise Exception(f'No visit_{type(node).__name__} method')
@@ -268,7 +327,7 @@ class Interpreter:
     def visit_Boolean(self, node: Boolean): return node.value
     def visit_VarAccess(self, node: VarAccess):
         val = self.current_env.get(node.name)
-        if isinstance(val, LambdaFunction) and len(val.params) == 0:
+        if isinstance(val, LambdaFunction) and len(val.params) == 0 and getattr(val, 'name', None) is not None:
             return val()
         return val
     def visit_Assign(self, node: Assign):
@@ -338,14 +397,14 @@ class Interpreter:
         return None
 
     def visit_FunctionDef(self, node: FunctionDef):
-        lf = LambdaFunction([a[0] for a in node.args], node.body, self)
+        lf = LambdaFunction([a[0] for a in node.args], node.body, self, name=node.name)
         self.current_env.set(node.name, lf)
         return lf
 
     def visit_Call(self, node: Call):
         func = self.current_env.get(node.name)
         args = [self.visit(a) for a in node.args]
-        if node.body: args.append(LambdaFunction([], node.body, self))
+        if node.body: args.append(LambdaFunction([], node.body, self, name=None))
         kwargs = {k: self.visit(v) for k, v in node.kwargs} if node.kwargs else {}
         return func(*args, **kwargs)
 
@@ -433,7 +492,23 @@ class Interpreter:
         val = self.visit(node.value)
         obj[idx] = val
         return val
-    def visit_Spawn(self, node: Spawn): return self._shared_executor.submit(self.visit, node.call)
+    def visit_Spawn(self, node: Spawn):
+        if not isinstance(node.call, Call):
+            raise Exception("Spawn requires a function call")
+        func = self.current_env.get(node.call.name)
+        args = [self.visit(a) for a in node.call.args]
+        if node.call.body:
+            args.append(LambdaFunction([], node.call.body, self, name=None))
+        kwargs = {k: self.visit(v) for k, v in node.call.kwargs} if node.call.kwargs else {}
+        
+        def run_threaded():
+            try:
+                func(*args, **kwargs)
+            except Exception as e:
+                import traceback
+                print(f"[Spawn Thread Error]: {e}")
+                traceback.print_exc()
+        return self._shared_executor.submit(run_threaded)
     def visit_Await(self, node: Await):
         f = self.visit(node.task)
         return f.result() if hasattr(f, 'result') else f

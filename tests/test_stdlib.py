@@ -1,14 +1,10 @@
 """
 Unit tests for ShellLite built-in/stdlib behavior.
 """
-import os
-import sys
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from unittest.mock import patch
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from shell_lite.interpreter import Interpreter
 from shell_lite.lexer import Lexer
@@ -19,15 +15,22 @@ class TestStdLib(unittest.TestCase):
     """Test suite for built-in functions exposed by the interpreter."""
 
     def run_code(self, code: str):
-        lexer = Lexer(code)
-        tokens = lexer.tokenize()
-        parser = Parser(tokens)
-        ast_nodes = parser.parse()
-        interpreter = Interpreter()
-        last_val = None
-        for node in ast_nodes:
-            last_val = interpreter.visit(node)
-        return interpreter.global_env, last_val, interpreter
+        try:
+            lexer = Lexer(code)
+            tokens = lexer.tokenize()
+
+            parser = Parser(tokens)
+            ast_nodes = parser.parse()
+
+            interpreter = Interpreter()
+
+            last_val = None
+            for node in ast_nodes:
+                last_val = interpreter.visit(node)
+
+            return interpreter.global_env, last_val, interpreter
+        except Exception as exc:
+            self.fail(f"Failed to execute ShellLite code: {code}\n{exc}")
 
     def test_builtin_value_functions(self):
         cases = [
